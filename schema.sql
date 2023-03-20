@@ -1,7 +1,8 @@
 DROP TABLE IF EXISTS LineItems;
 DROP TABLE IF EXISTS Orders;
-DROP TABLE IF EXISTS Stores;
 DROP TABLE IF EXISTS AbandonedCheckout;
+DROP TABLE IF EXISTS Disputes;
+DROP TABLE IF EXISTS Stores;
 
 CREATE TABLE Stores(
     name TEXT PRIMARY KEY,
@@ -36,6 +37,21 @@ CREATE TABLE AbandonedCheckout(
     first_name TEXT,
     last_name TEXT,
     email TEXT,
+    store_name TEXT NOT NULL,
+    FOREIGN KEY (store_name)
+        REFERENCES Stores (name)
+            ON UPDATE CASCADE
+            ON DELETE CASCADE
+);
+
+CREATE TABLE Disputes(
+    id REAL PRIMARY KEY,
+    order_id REAL,
+    type TEXT NOT NULL,
+    amount TEXT NOT NULL,
+    currency TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL,
     store_name TEXT NOT NULL,
     FOREIGN KEY (store_name)
         REFERENCES Stores (name)

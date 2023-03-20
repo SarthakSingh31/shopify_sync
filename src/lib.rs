@@ -1,13 +1,16 @@
+mod dispute;
+mod order;
+
 use std::collections::BTreeMap;
 
 use base64::Engine;
+use dispute::{Dispute, Disputes};
+use order::{Order, Orders};
 use time::format_description::well_known::{
     iso8601::{Config, EncodedConfig, TimePrecision},
     Iso8601,
 };
-use worker::{
-    D1Database, Env, Fetch, Headers, Method, Request, RequestInit, Response, RouteContext, Url,
-};
+use worker::{Env, Fetch, Headers, Method, Request, RequestInit, Response, RouteContext, Url};
 
 const DB_BINDING: &'static str = "ShopifyDB";
 
@@ -23,7 +26,9 @@ async fn main(req: Request, env: worker::Env, _ctx: worker::Context) -> worker::
         .get_async("/gdpr/data_request", data_request)
         .get_async("/gdpr/data_erasure", data_erasure)
         .get_async("/gdpr/shop_erasure", shop_erasure)
-        .post_async("/api/order_webhook/:store", handle_order_webhook)
+        .post_async("/api/order_webhook/:store", Order::handle_webhook)
+        .post_async("/api/dispute_create/:store", Dispute::handle_create_webhook)
+        .post_async("/api/dispute_update/:store", Dispute::handle_update_webhook)
         .run(req, env)
         .await
 }
@@ -49,7 +54,10 @@ async fn install_request<'a, D: 'a>(
                 "client_id",
                 &ctx.env.secret("SHOPIFY_CLIENT_ID")?.to_string(),
             );
-            pairs.append_pair("scope", "read_customers,read_orders");
+            pairs.append_pair(
+                "scope",
+                "read_customers,read_orders,read_shopify_payments_disputes",
+            );
             pairs.append_pair(
                 "redirect_uri",
                 &format!(
@@ -68,9 +76,10 @@ async fn install_request<'a, D: 'a>(
 }
 
 #[derive(serde::Deserialize)]
-struct Token {
+pub struct Token {
     access_token: String,
 }
+
 impl Token {
     async fn store_token<'a, D: 'a>(
         req: Request,
@@ -149,114 +158,9 @@ struct Customer {
     email: Option<String>,
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct LineItem {
-    title: String,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct Order {
-    id: f64,
-    customer: Customer,
-    line_items: Vec<LineItem>,
-}
-
-impl Order {
-    async fn insert_in_db(&self, db: &D1Database, shop: &str) -> worker::Result<()> {
-        db.exec(&format!(
-            "INSERT INTO Orders VALUES ({}, {}, {}, {}, '{}');",
-            self.id,
-            if let Some(name) = &self.customer.first_name {
-                format!("'{name}'")
-            } else {
-                "NULL".to_string()
-            },
-            if let Some(name) = &self.customer.last_name {
-                format!("'{name}'")
-            } else {
-                "NULL".to_string()
-            },
-            if let Some(email) = &self.customer.email {
-                format!("'{email}'")
-            } else {
-                "NULL".to_string()
-            },
-            shop,
-        ))
-        .await?;
-
-        for item in &self.line_items {
-            db.prepare(format!("INSERT INTO LineItems VALUES (?, {});", self.id))
-                .bind(&[item.title.as_str().into()])?
-                .all()
-                .await?;
-        }
-        Ok(())
-    }
-}
-
-#[derive(serde::Deserialize)]
-struct Orders {
-    orders: Vec<Order>,
-}
-
-impl Orders {
-    async fn insert_in_db(&self, db: &D1Database, shop: &str) -> worker::Result<()> {
-        let orders = self
-            .orders
-            .iter()
-            .map(|order| {
-                format!(
-                    "({}, {}, {}, {}, '{}')",
-                    order.id,
-                    if let Some(name) = &order.customer.first_name {
-                        format!("'{name}'")
-                    } else {
-                        "NULL".to_string()
-                    },
-                    if let Some(name) = &order.customer.last_name {
-                        format!("'{name}'")
-                    } else {
-                        "NULL".to_string()
-                    },
-                    if let Some(email) = &order.customer.email {
-                        format!("'{email}'")
-                    } else {
-                        "NULL".to_string()
-                    },
-                    shop,
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-
-        if !orders.is_empty() {
-            db.exec(&format!("INSERT INTO Orders VALUES {};", orders))
-                .await?;
-        }
-
-        let line_items = self
-            .orders
-            .iter()
-            .flat_map(|order| {
-                order
-                    .line_items
-                    .iter()
-                    .map(|item| format!("('{}', {})", item.title, order.id))
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-
-        if !line_items.is_empty() {
-            db.exec(&format!("INSERT INTO LineItems VALUES {};", line_items))
-                .await?;
-        }
-
-        Ok(())
-    }
-}
-
 async fn init_store(token: Token, shop: &str, env: &Env) -> worker::Result<()> {
+    let base_uri = env.secret("SHOPIFY_BASE_URI")?.to_string();
+
     fetch(
         &token,
         Request::new_with_init(
@@ -266,8 +170,7 @@ async fn init_store(token: Token, shop: &str, env: &Env) -> worker::Result<()> {
                     serde_json::json!({
                         "webhook": {
                             "address": format!(
-                                "{}{}/{}",
-                                env.secret("SHOPIFY_BASE_URI")?.to_string(),
+                                "{base_uri}{}/{}",
                                 "api/order_webhook",
                                 shop,
                             ),
@@ -291,47 +194,84 @@ async fn init_store(token: Token, shop: &str, env: &Env) -> worker::Result<()> {
     )
     .await?;
 
-    let mut resp = fetch(
+    fetch(
         &token,
         Request::new_with_init(
-            &format!("https://{shop}/admin/api/2023-01/orders.json?financial_status=paid&fields=id,customer,line_items&limit=250"),
-            &RequestInit::default(),
+            &format!("https://{shop}/admin/api/2023-01/webhooks.json"),
+            &RequestInit {
+                body: Some(
+                    serde_json::json!({
+                        "webhook": {
+                            "address": format!(
+                                "{base_uri}{}/{}",
+                                "api/dispute_create",
+                                shop,
+                            ),
+                            "topic": "disputes/create",
+                            "format": "json"
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ),
+                method: Method::Post,
+                headers: {
+                    let mut headers = Headers::default();
+                    headers.append("Content-Type", "application/json")?;
+
+                    headers
+                },
+                ..Default::default()
+            },
         )?,
     )
     .await?;
 
-    let mut orders: Orders = resp.json().await?;
+    fetch(
+        &token,
+        Request::new_with_init(
+            &format!("https://{shop}/admin/api/2023-01/webhooks.json"),
+            &RequestInit {
+                body: Some(
+                    serde_json::json!({
+                        "webhook": {
+                            "address": format!(
+                                "{base_uri}{}/{}",
+                                "api/dispute_update",
+                                shop,
+                            ),
+                            "topic": "disputes/update",
+                            "format": "json"
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ),
+                method: Method::Post,
+                headers: {
+                    let mut headers = Headers::default();
+                    headers.append("Content-Type", "application/json")?;
 
-    let mut link = resp.headers().get("Link")?;
-
-    while let Some(url) = link {
-        let mut resp = fetch(&token, Request::new(&url, Method::Get)?).await?;
-
-        let next_orders: Orders = resp.json().await?;
-        orders.orders.extend(next_orders.orders);
-
-        link = resp.headers().get("Link")?;
-    }
+                    headers
+                },
+                ..Default::default()
+            },
+        )?,
+    )
+    .await?;
 
     let db = env.d1(DB_BINDING)?;
 
-    orders.insert_in_db(&db, shop).await?;
+    Orders::fetch(&token, shop)
+        .await?
+        .insert_in_db(&db, shop)
+        .await?;
+    Disputes::fetch(&token, shop)
+        .await?
+        .insert_in_db(&db, shop)
+        .await?;
 
     Ok(())
-}
-
-async fn handle_order_webhook<'a, D: 'a>(
-    mut req: Request,
-    ctx: RouteContext<D>,
-) -> worker::Result<Response> {
-    let order: Order = req.json().await?;
-    let shop = ctx.param("store").expect("Failed to find store param");
-
-    let db = ctx.env.d1(DB_BINDING)?;
-
-    order.insert_in_db(&db, shop).await?;
-
-    Response::ok("ok")
 }
 
 async fn sync_abandoned_checkouts<'a, D: 'a>(

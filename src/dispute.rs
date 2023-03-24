@@ -11,6 +11,9 @@ pub struct Dispute {
     currency: String,
     reason: String,
     status: String,
+    initiated_at: String,
+    evidence_due_by: String,
+    evidence_sent_on: Option<String>,
 }
 
 impl Dispute {
@@ -24,7 +27,7 @@ impl Dispute {
         let db = ctx.env.d1(DB_BINDING)?;
 
         db.exec(&format!(
-            "INSERT INTO Disputes VALUES ({}, {}, '{}', '{}', '{}', '{}', '{}', '{}');",
+            "INSERT INTO Disputes VALUES ({}, {}, '{}', '{}', '{}', '{}', '{}', '{}', '{}', {}, '{}');",
             dispute.id,
             if let Some(order_id) = &dispute.order_id {
                 order_id.to_string()
@@ -36,6 +39,13 @@ impl Dispute {
             dispute.currency,
             dispute.reason,
             dispute.status,
+            dispute.initiated_at,
+            dispute.evidence_due_by,
+            if let Some(sent_on) = &dispute.evidence_sent_on {
+                format!("'{sent_on}'")
+            } else {
+                "NULL".to_string()
+            },
             shop,
         ))
         .await?;
@@ -52,7 +62,7 @@ impl Dispute {
         let db = ctx.env.d1(DB_BINDING)?;
 
         db.exec(&format!(
-            "UPDATE Disputes SET order_id = {}, type = '{}', amount = '{}', currency = '{}', reason = '{}', status = '{}' WHERE id = {};",
+            "UPDATE Disputes SET order_id = {}, type = '{}', amount = '{}', currency = '{}', reason = '{}', status = '{}', evidence_due_by = '{}', evidence_sent_on = '{}', evidence_sent_on = {} WHERE id = {};",
             if let Some(order_id) = &dispute.order_id {
                 order_id.to_string()
             } else {
@@ -63,6 +73,13 @@ impl Dispute {
             dispute.currency,
             dispute.reason,
             dispute.status,
+            dispute.initiated_at,
+            dispute.evidence_due_by,
+            if let Some(sent_on) = &dispute.evidence_sent_on {
+                format!("'{sent_on}'")
+            } else {
+                "NULL".to_string()
+            },
             dispute.id,
         ))
         .await?;
@@ -122,7 +139,7 @@ impl Disputes {
             .iter()
             .map(|dispute| {
                 format!(
-                    "({}, {}, '{}', '{}', '{}', '{}', '{}', '{}')",
+                    "({}, {}, '{}', '{}', '{}', '{}', '{}', '{}', '{}', {}, '{}')",
                     dispute.id,
                     if let Some(order_id) = &dispute.order_id {
                         order_id.to_string()
@@ -134,6 +151,13 @@ impl Disputes {
                     dispute.currency,
                     dispute.reason,
                     dispute.status,
+                    dispute.initiated_at,
+                    dispute.evidence_due_by,
+                    if let Some(sent_on) = &dispute.evidence_sent_on {
+                        format!("'{sent_on}'")
+                    } else {
+                        "NULL".to_string()
+                    },
                     shop,
                 )
             })
@@ -148,3 +172,4 @@ impl Disputes {
         Ok(())
     }
 }
+

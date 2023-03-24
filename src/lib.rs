@@ -311,7 +311,7 @@ async fn sync_abandoned_checkouts<'a, D: 'a>(
         };
 
         let url = format!(
-            "https://{}/admin/api/2023-01/checkouts.json?limit=250&status=open{}",
+            "https://{}/admin/api/2023-01/checkouts.json?limit=250{}",
             shop.name,
             if let Some(datetime) = shop.last_abandoned_checkout_sync {
                 const CONFIG: EncodedConfig = Config::DEFAULT

@@ -52,6 +52,9 @@ CREATE TABLE Disputes(
     currency TEXT NOT NULL,
     reason TEXT NOT NULL,
     status TEXT NOT NULL,
+    initiated_at TEXT NOT NULL,
+    evidence_due_by TEXT NOT NULL,
+    evidence_sent_on TEXT,
     store_name TEXT NOT NULL,
     FOREIGN KEY (store_name)
         REFERENCES Stores (name)
